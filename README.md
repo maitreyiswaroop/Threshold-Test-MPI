@@ -14,8 +14,11 @@ This involves the following:
 
 ## Problem Formulation
 Given:
-    1. Dataset of socially-salient attributes of $N$ individuals, $\mathcal{X}=\left\{\mathbf{x}_{i}\right\}_{i=1}^{N}$, each $\mathbf{x}_{i}$ is a vector of $K$ socially-salient attributes, eg. $\quad \mathbf{x}_{i}=(\underbrace{x_{1}}_{\text {race }} \underbrace{x_{2}}_{\substack{\text { gender }}} \cdots \underbrace{x_{k}}_{\substack{\text { income } \\ \text { bracket }}})$
+
+    1. Dataset of socially-salient attributes of $N$ individuals, $\mathcal{X}=\{\mathbf{x}_{i}\}_{i=1}^{N}$, each $\mathbf{x}_{i}$ is a vector of $K$ socially-salient attributes, eg. $$\mathbf{x}_{i}=(\underbrace{x_{1}}_{\text{race }} \underbrace{x_{2}}_{\substack{\text { gender }}} \cdots \underbrace{x_{k}}_{\substack{\text { income } \\ \text { bracket }}})$$
+
     2. The final level decision taken by the decision maker, $\mathcal{D}=\left\{d_{i}\right\}_{i=1}^{N}$,  $d_{i}\in \{0,1\}$.
+    
     3. The true label of the individual (true category of the individual, observed if the decision taken was $=1$), $\mathcal{Y}=\left\{y_{i}\right\}_{i=1}^{N}$,  $y_{i}\in \{0,1\}$.
 
 Our goal is to cluster the data according to (1.), (2.) and (3.), using the Dirichlet process mixture model (DPMM), a Bayesian nonparametric model for clustering, and to infer the true model parameters.
