@@ -1,0 +1,1055 @@
+---
+title: "Inferring Groups and Thresholds"
+output:
+  html_notebook:
+      toc: yes
+  pdf_document:
+      toc: yes
+---
+
+# Preliminaries
+## Packages and Libraries
+### Packages
+```{r}
+install.packages("dirichletprocess")
+install.packages("rBeta2009") # for using rdirichlet
+install.packages('spsh') # for using Ibeta
+install.packages('extraDistr')
+install.packages("aricode")
+install.packages("ggplot2") # for plotting data
+install.packages("gridExtra") # for plotting data
+```
+
+### Libraries
+```{r}
+library(ggplot2)
+library(dirichletprocess)
+library(rBeta2009)
+library(spsh)
+library(extraDistr)
+library(aricode)
+library(ggplot2)
+library(gridExtra)
+library(gtable)
+```
+
+## Utility Functions
+```{r}
+simplex_norm <- function(x){
+  # print("simplex norm called, x= "); print(x); print("simplex_norm returns"); print(x/(sum(x)));
+  return(x/(sum(x)))
+}
+```
+
+```{r}
+minmax01 <-function(x, l=0, r=1){
+  if(is.nan(x)){return(0)}
+  if(is.infinite(x)){return(1)}
+  return(min(max(x,l),r))
+}
+```
+
+
+```{r}
+frac<-function(n){
+  return (abs(n)-floor(abs(n)))
+}
+```
+
+
+```{r}
+Rbeta <- function(x,a,b){
+  return(Ibeta(x,a,b)/beta(a,b))
+}
+
+Rbeta_phi_lambda <- function(x,phi,lambda){
+  # if(round(phi*x*lambda,5)==0) return(0)
+  # if(round(phi,2)==1 || round(x,2)==1) return(0)
+  a<-abs(round(phi*lambda,8))
+  b<-abs(round((1.0-phi)*lambda ,8))
+  # print("Rbeta_phi_lambda called. ");print(c(a,b));print(c(phi, lambda));
+  return(Ibeta(x,a,b)/beta(a,b))
+}
+```
+
+## Globals
+```{r}
+set.seed(2)
+K <- 1 # number of observed traits
+m <- c(2)  # number of categories for each of the K traits
+```
+
+## Hyperparameters
+```{r}
+alpha <- 1.0 # Dirichlet Process concentration parameter
+
+# Hyperparameters for the beta distribution from which probability is drawn
+# p_i ~ Beta(phi, lambda)
+# Hyperparameters for phi~U[0,1]: None needed
+# Hyperparameters for lambda~
+a0_lambda <- 2
+b0_lambda <- 10
+
+# Parameters for beta dist. from which threshold is drawn
+phi_t <- 0.5
+lambda_t <- 8
+
+# Parameter for DP cluster allocation
+clust_alpha<-1
+```
+
+
+# Generative Process
+
+## Generating Functions
+```{r}
+# Function to generate individuals (returns (trait vector, search decision, outcome of search (if search decision==1)))
+generateInd <- function(theta, allTrueLabels=FALSE){
+  x_i<-list()
+  # print(theta_x)
+  for(k in 1:K){
+    x_i<-append(x_i, sample((1:m[k]),1, FALSE, theta[[k]]))
+  }
+  p_i <- rbeta(1,theta[[K+1]]*theta[[K+2]],theta[[K+2]]*(1-theta[[K+1]]))
+  true_label<-rbern(1, p_i)
+  if(allTrueLabels==TRUE){
+      all_true_labels[icount]<<-true_label
+      true_pi[icount]<<- p_i
+      icount<<-icount+1
+  }
+  if(p_i>theta[[K+3]]){
+    x_i<-append(x_i,list(1,true_label))
+    return(x_i)
+  }
+  else{
+    x_i<-append(x_i,list(0,NA))
+    return(x_i)
+  }
+}
+
+# Function to generate cluster parameters (returns (parameters of categorical distributions, parameters of beta distribution, threshold))
+generateCluster <- function(){
+  theta<-list()
+  # Cluster parameters for categorical distributions
+  for (k in 1:K) { # for each of the K features
+    # print("Error here?")
+    theta<-append(theta, list(c(rdirichlet(1, rep(1,m[k]))))) # Categorical probabilities
+  }  
+  # Cluster parameters for beta distribution
+  theta<-append(theta,c(round(runif(1,0,1),2), round(rinvgamma(1, a0_lambda, b0_lambda),1)))
+  theta<-append(theta,round(rbeta(1, phi_t*lambda_t, lambda_t*(1-phi_t)),2))
+  return(theta)
+}
+```
+
+
+## Generative Process (Execution)
+```{r}
+clust_alpha<-0 # set 0 for single cluster
+gen_N <- 500 # number of individuals to generate
+gen_z <- 1 # initialising number of clusters to 1 (for first individual)
+gen_n_c <- c(1) # number of individuals per cluster
+gen_c <- rep(1, times=gen_N) # cluster assignments of individuals
+gen_theta <- list() # list of parameters of generated clusters
+gen_prob_cluster <- c(1/(1+clust_alpha), clust_alpha/(1+clust_alpha))
+
+genTrueLabels=TRUE
+if(genTrueLabels==TRUE){
+  all_true_labels<-numeric(gen_N)
+  true_pi<-numeric(gen_N)
+  icount<-1
+}
+
+gen_pop <- list()
+
+# First individual (i=1) goes, by default, to the first cluster
+gen_theta <- append(gen_theta, list(generateCluster()))
+gen_pop <- append(gen_pop, list(list(generateInd(gen_theta[[1]], allTrueLabels = genTrueLabels))))
+
+# For the remaining individuals
+for (i in 2:gen_N){
+  # print(gen_prob_cluster)
+  # print(gen_z)
+  c_i <- sample((1:(gen_z+1)),1, FALSE, gen_prob_cluster) # sampling the cluster for i
+  gen_c[[i]] <- c_i # updating the cluster assignment list for i
+  if(c_i == gen_z+1){
+    # print("here")
+    # individual i has been assigned a new cluster
+    gen_z <- gen_z+1 # updating number of clusters
+    gen_n_c <- append(gen_n_c, 1) # updating number of individuals in assigned cluster
+    # sample new cluster parameters
+    gen_theta <- append(gen_theta, list(generateCluster()))
+    gen_pop <- append(gen_pop, list(list(generateInd(gen_theta[[gen_z]], allTrueLabels = genTrueLabels))))
+    # updating the cluster assignment probabilities
+    for(j in 1:gen_z){
+      gen_prob_cluster[[j]] <- gen_n_c[[j]]/(i + clust_alpha)
+    }
+    gen_prob_cluster <- append(gen_prob_cluster, clust_alpha/(i + clust_alpha))
+  }
+  else{
+    # individual i has been assigned an existing cluster
+    gen_n_c[[c_i]] <- gen_n_c[[c_i]]+1  # updating number of individuals in assigned cluster
+    # generate individual using existing cluster parameters
+    gen_pop[[c_i]] <- append(gen_pop[[c_i]], list(generateInd(gen_theta[[c_i]], allTrueLabels = genTrueLabels)))
+    # updating the cluster assignment probabilities
+    for(j in 1:gen_z){
+      gen_prob_cluster[[j]] <- gen_n_c[[j]]/(i + clust_alpha)
+    }
+    gen_prob_cluster[[gen_z+1]] <- clust_alpha/(i + clust_alpha)
+  }
+}
+# for(i in 1:gen_N){if(!(is.na(synth_pop[[i]][K+2])) && synth_pop[[i]][K+2]!=all_true_labels[i]) print(i)}
+```
+
+```{r}
+temp_synth_pop<-unlist(gen_pop, recursive = FALSE)
+old_gen_theta<-gen_theta
+old_gen_c<-gen_c
+old_gen_N<-gen_N
+old_gen_n_c<-gen_n_c
+old_gen_z<-gen_z
+```
+
+### Dropping those clusters which have <10 individuals
+```{r}
+ind_to_rem<-c()
+clust_to_rem<-c()
+for(nc in 1:gen_z){
+  if(gen_n_c[[nc]]<101){
+    clust_to_rem<-append(clust_to_rem, nc)
+    ind_to_rem<-append(ind_to_rem, which(gen_c==nc)) # individuals to remove
+  }
+}
+```
+
+```{r}
+synth_pop<-temp_synth_pop[-ind_to_rem]
+gen_theta<-gen_theta[-clust_to_rem]
+gen_c<-gen_c[-ind_to_rem]
+gen_N<-gen_N-length(ind_to_rem)
+gen_n_c<-gen_n_c[-clust_to_rem]
+gen_z<-gen_z-length(clust_to_rem)
+```
+
+```{r}
+j<-1
+for(i in 1:max(gen_n_c)){
+  if(any(gen_c==i)){
+    gen_c[gen_c==i]<-j
+    j<-j+1
+  }
+}
+gen_n_c<-as.vector(table(gen_c))
+```
+
+```{r}
+gen_theta2<-list()
+for(j in 1:(K+3)){
+  temp<-list()
+  for(i in 1:gen_z){
+    temp<-append(temp, list(gen_theta[[i]][[j]]))
+  }
+  gen_theta2<-append(gen_theta2, list(array(unlist(temp),dim=c(1,length(gen_theta[[1]][[j]]),gen_z))))
+}
+```
+
+
+# Plots
+
+```{r}
+betap<-seq(0, 1, length=100)
+```
+
+### Generated Data Categorical Distributions
+```{r}
+df1 <- data.frame(cluster=rep(paste("cluster", c(1:gen_z)), each=m[1]),
+                category=paste("category", c(1:m[1])),
+                Probability=as.vector(gen_theta2[[1]][,,]))
+# head(df2)
+ggplot(data=df1, aes(x=category, y=Probability, fill=cluster)) +
+  geom_bar(stat="identity", position=position_dodge())+
+  geom_text(aes(label=round(Probability,4)), vjust=-0.8, color="black",
+            position = position_dodge(0.9), size=3.5)+
+  scale_fill_brewer(palette="Paired")+
+  theme_minimal()
+```
+
+### Generated Data Beta Distributions, with Thresholds
+```{r}
+par(mfrow=c(1,gen_z))
+for(i in 1:gen_z){
+  plot(betap, dbeta(betap, gen_theta2[[K+1]][,,i]*gen_theta2[[K+2]][,,i], (1-gen_theta2[[K+1]][,,i])*gen_theta2[[K+2]][,,i]), type='l', ylab='density')+abline(v = gen_theta2[[K+3]][,,i], col='red')
+  legend(cex=0.5, "topleft",legend=c(paste('Beta(',round(gen_theta2[[K+1]][,,i],2),',',round(gen_theta2[[K+2]][,,i],1),')'), paste('t = ', round(gen_theta2[[K+3]][,,i],2))),col=c('black','red'))
+}
+```
+
+```{r}
+if(sd(gen_theta2[[K+3]][,,])<0.1){
+  print("Generate again")
+  print(paste("stddev", sd(gen_theta2[[K+3]][,,])))
+}
+```
+
+### Final Synthetic Population
+
+
+
+# Inference
+## Defining the Mixing Distribution Object
+
+Section 4.1 of https://cran.r-project.org/web/packages/dirichletprocess/vignettes/dirichletprocess.pdf
+
+Since we are working with a non-conjugate mixing distribution, we need to define the following:
+
+1. $\texttt{Likelihood}$
+2. $\texttt{PriorDraw}$  
+3. $\texttt{g0Priors}$
+4. $\texttt{PriorDensity}$
+5. $\texttt{mhParameterProposal}$
+6. $\texttt{mhStepSize}$
+
+
+### 1. Likelihood Function
+
+A function which specifies the density of the mixture kernel $k(y | \theta)$.
+
+Since ours is a mixture of a _composite_ distribution (involving multiple categorical distributions and two beta distributions), we define the Likelihood function as the product of the likelihoods of each of the RVs (thus there is an assumption of independence).
+
+```{r}
+# Likelihood function
+# Likelihood function
+Likelihood.combined <- function(mdobj, ind, theta){
+    # likelihoodCalls<<-likelihoodCalls+1
+    cur_theta_y1 <- theta[[K+1]]
+    cur_theta_y2 <- theta[[K+2]] 
+    cur_theta_t <- theta[[K+3]]
+    
+    # print("Debug for memo:");print(length(cur_theta_y1));print(size(cur_theta_y1));print(cur_theta_y1); 
+    # print(length(cur_theta_y2));print(size(cur_theta_y2));print(cur_theta_y2); 
+    
+    inc_bet<-numeric(length(cur_theta_t))
+    for(i in 1:length(cur_theta_t)){
+      inc_bet[i]<-Rbeta_memo[round((cur_theta_t[,,i]-t_min)/t_inc)+1, round((cur_theta_y1[,,i]-phi_min)/phi_inc)+1, round((cur_theta_y2[,,i]-lambda_min)/lambda_inc)+1]
+    }
+    # inc_bet<-Rbeta_phi_lambda(cur_theta_t, cur_theta_y1, cur_theta_y2)
+    inc_bet[inc_bet<0]<-0; inc_bet[is.infinite(inc_bet)]<-1; 
+    inc_bet[is.nan(inc_bet)]<-0; inc_bet[inc_bet>1]<-1;
+    
+    x<-1
+    for(k in 1:K){
+      x<-x*as.numeric(dcat(ind[,k], matrix(c(theta[[k]]), length(cur_theta_t), m[k])))
+    }
+    d<-as.numeric(dbern(ind[,K+1], round(1-inc_bet, 8)))
+    
+    if(nrow(ind)==1){
+      if(ind[,K+1]==0) return(x*d)
+      else{
+        temp_mu <- (cur_theta_y1*cur_theta_y2+1)/(cur_theta_y2+1); temp_lambda_new <- cur_theta_y2+1;
+        # print("inc_bet");print(inc_bet);print("cur_theta_t");print(cur_theta_t);print("temp_mu");print(temp_mu);print("temp_lambda_new");print(temp_lambda_new);
+        exp_arg <- cur_theta_y1*(1-Rbeta_phi_lambda(cur_theta_t, temp_mu, temp_lambda_new))/(1-inc_bet)
+        exp_arg[exp_arg<0]<-0; exp_arg[exp_arg>1]<-1;
+        exp_arg[is.nan(exp_arg)]<-0; exp_arg[is.infinite(exp_arg)]<-1; 
+        return(x*d*dbern(ind[,K+2], exp_arg))
+      }
+    }
+    else{
+      temp_mu <- (cur_theta_y1*cur_theta_y2+1)/(cur_theta_y2+1); temp_lambda_new <- cur_theta_y2+1;
+      # print("inc_bet");print(inc_bet);print("cur_theta_t");print(cur_theta_t);print("temp_mu");print(temp_mu);print("temp_lambda_new");print(temp_lambda_new);
+      exp_arg <- cur_theta_y1*(1-Rbeta_phi_lambda(cur_theta_t, temp_mu, temp_lambda_new))/(1-inc_bet)
+      exp_arg[exp_arg<0]<-0; exp_arg[exp_arg>1]<-1;
+      exp_arg[is.nan(exp_arg)]<-0; exp_arg[is.infinite(exp_arg)]<-0; 
+      y<-as.numeric(dbern(ind[,K+2], exp_arg)*(ind[,K+1]==1))
+      y[is.na(y)]<-1
+      return(x*d*y)
+    }
+}  
+  
+```
+
+### 2. PriorDraw Function
+A function which returns a random sample of size $n$ from the DP base measure $G_0$. This is used to define $G_0$.
+
+```{r}
+PriorDraw.combined <- function(mdobj, n=1){
+  priorDrawCalls<<-priorDrawCalls+1
+  theta<-list()
+  # Cluster parameters for categorical distributions
+  for (k in 1:K) { # for each of the K features
+      theta[[k]] = array(aperm(rdirichlet(n, rep(mdobj$priorParameters[[1]]/m[k],m[k]))), dim = c(1, m[k],n)) # Categorical probabilities
+  }  
+  # Cluster parameters for beta distribution
+  theta[[K+1]] = round(array(runif(n,0,1), dim = c(1,1,n)),2)
+  theta[[K+2]] = round(array(rinvgamma(n, mdobj$priorParameters[[2]], mdobj$priorParameters[[3]]), dim = c(1,1,n)),1)
+  theta[[K+2]][theta[[K+2]]>=50]<-45 #TO CHECK 11JULY
+  theta[[K+3]] = round(array(rbeta(n, mdobj$priorParameters[[4]]*mdobj$priorParameters[[5]], mdobj$priorParameters[[5]]*(1-mdobj$priorParameters[[4]])), dim = c(1,1,n)),2)
+  theta[[K+3]][theta[[K+3]]==1]<-0.99
+  # print("Prior drawn: theta = "); print(theta); print("_________");
+  # print("PriorDraw returns"); print(theta);print("theta[[1]]"); print(theta[[1]]);
+  # print("size of theta returned by PriorDraw"); print(size(theta)); print("n in prior draw"); print(n);
+  return(theta)
+}
+```
+
+
+### 3. $G_0$ Priors
+A list of parameters for the base measure $G_0$. Again, this is used to define $G_0$.
+```{r}
+# Identical to the subsection Hyperparameters
+# the assignment of these values to the g0Priors takes place while declaring the DP object
+alpha <- 1.0 # Dirichlet Process concentration parameter
+
+# Hyperparameters for the beta distribution from which probability is drawn
+# p_i ~ Beta(phi, lambda)
+# Hyperparameters for phi~U[0,1]: None needed
+# Hyperparameters for lambda~
+a0_lambda <- 2.0
+b0_lambda <- 10.0
+
+# Parameters for beta dist. from which threshold is drawn
+phi_t <- 0.5
+lambda_t <- 8.0
+```
+
+
+### 4. Prior Density
+A function which evaluates $p(\theta)$ which is the DP base measure $G_0$ for a given $\theta$.
+As we are drawing from the posterior distribution using the Metropolis-Hastings algorithm, we also need a function that calculates the prior density for a given $\theta$.
+```{r}
+# Need to check
+PriorDensity.combined <- function(mdobj, theta){
+  # priorDensityCalls<<-priorDensityCalls+1
+  priorParameters <- mdobj$priorParameters
+  # due to threshold
+  thetaDensity<-dbeta(theta[[K+3]], mdobj$priorParameters[[4]]*mdobj$priorParameters[[5]], mdobj$priorParameters[[5]]*(1-mdobj$priorParameters[[4]]))
+  thetaDensity<-thetaDensity*dinvgamma(theta[[K+2]], mdobj$priorParameters[[2]], mdobj$priorParameters[[3]])
+  thetaDensity<-thetaDensity*dunif(theta[[K+1]],0, 1)
+  # Cluster parameters for categorical distributions
+  for (k in 1:K) { # for each of the K features
+    thetaDensity<-thetaDensity*ddirichlet(c(theta[[k]]), matrix(c(rep(mdobj$priorParameters[[1]]/m[k],m[k])), 1, m[k]))
+  }
+  return(as.numeric(thetaDensity))
+}
+```
+
+
+### 5. mhParameterProposal
+A function that returns a candidate parameter to be evaluated for the Metropolis-Hastings algorithm.
+```{r}
+# Need to work on
+MhParameterProposal.combined <- function(mdobj, oldParams){
+  # MhParameterProposalCalls<<-MhParameterProposalCalls+1
+  mhStepSize <- mdobj$mhStepSize
+  newParams <- oldParams
+  # print("Problem here now in MhParameterProposal.combined?")
+  for(k in 1:K){
+    newParams[[k]] <- simplex_norm(abs(oldParams[[k]] + mhStepSize[[k]]*rnorm(m[k], sd=1)))
+  }
+  newParams[[K+1]] <- round(abs(frac(oldParams[[K+1]] + mhStepSize[[K+1]]*rnorm(1, sd=1))),2) # frac because phi\in [0,1]
+  if(any(newParams[[K+1]]>= 1)|| any(newParams[[K+1]]<= 0)) {
+    newParams[[K+1]] <- oldParams[[K+1]]
+  }
+  newParams[[K+2]] <- round(abs(oldParams[[K+2]] + mhStepSize[[K+2]]*rnorm(1, sd=1)),1) # min to prevent NaN warnings in Rbeta
+  if(any(newParams[[K+2]]>(lambda_max-5))) newParams[[K+2]]<-oldParams[[K+2]]
+  newParams[[K+3]] <-round( abs(frac(oldParams[[K+3]] + mhStepSize[[K+3]]*rnorm(1, sd=1))),2) # frac because t\in [0,1]
+  if(any(newParams[[K+3]]>= 1)|| any(newParams[[K+3]]<= 0)) {
+    newParams[[K+3]] <- oldParams[[K+3]]
+  }
+
+  return(newParams)
+}
+```
+
+
+### 6. mhStepSize
+$h$, the size of the step to make when proposing a new parameter for the Metropolis-Hastings algorithm.
+```{r}
+# Need to work one
+h <- c(rep(0.05, K), 0.05, 0.1, 0.05)
+```
+
+### Defining the mixing distribution object
+```{r}
+combinedMD <- MixingDistribution(distribution = "combined",
+          priorParameters=c(alpha, a0_lambda, b0_lambda, phi_t, lambda_t),
+          conjugate = "nonconjugate",
+          mhStepSize = h) #<----Need to work on
+```
+
+
+## Fitting the DP
+Having specified the above, the Fit function can again be used to fit the DP, which carries out the
+Chinese Restaurant Sampling can be performed using ‘Algorithm 8‘ (Neal 2000).
+
+## Dirichlet Process Object Definitions
+Once the appropriate mixing distribution is defined we can create a dirichletprocess object
+which contains the data, the mixing distribution object and the parameter α. Then the rest
+of dirichletprocess class functions are available.
+```{r}
+y <- aperm(array(unlist(synth_pop), dim=c(K+2,gen_N))) #generate sample data
+```
+
+```{r}
+dp <- DirichletProcessCreate(y, combinedMD)
+likelihoodCalls<-0; priorDrawCalls<-0; priorDensityCalls<-0;MhParameterProposalCalls<-0;
+print("Initialising")
+initialise_start_time = Sys.time()
+dp <- Initialise(dp, verbose=TRUE)
+initialise_end_time = Sys.time()
+print(initialise_end_time-initialise_start_time)
+# print(c(likelihoodCalls, priorDrawCalls, priorDensityCalls,MhParameterProposalCalls))
+```
+
+## Using Inbuilt Fit
+```{r}
+fit_start_time = Sys.time()
+print("Starting at:");print(fit_start_time);
+dp <- Fit(dp, 1000)
+fit_end_time = Sys.time() 
+print(fit_end_time-fit_start_time)
+```
+
+## Customise Fit
+
+```{r}
+fit_start_time = Sys.time()
+print("Starting at:");print(fit_start_time);
+fq<-1
+NMI_list<-numeric(round(its/fq))
+updatePrior = FALSE
+progressBar = interactive()
+its <- 1000
+toplot<-TRUE
+
+if (progressBar){pb <- txtProgressBar(min=0, max=its, width=50, char="-", style=3)}
+
+alphaChain <- numeric(its)
+likelihoodChain <- numeric(its)
+if(genTrueLabels==TRUE) completeLikelihoodChain<-numeric(its)
+weightsChain <- vector("list", length = its)
+clusterParametersChain <- vector("list", length = its)
+priorParametersChain <- vector("list", length = its)
+labelsChain <- vector("list", length = its)
+pointsPerClusterChain <- vector("list", length = its)
+
+for (i in seq_len(its)) {
+    alphaChain[i] <- dp$alpha
+    weightsChain[[i]] <- dp$pointsPerCluster / dp$n
+    clusterParametersChain[[i]] <- dp$clusterParameters
+    priorParametersChain[[i]] <- dp$mixingDistribution$priorParameters
+    labelsChain[[i]] <- dp$clusterLabels
+    pointsPerClusterChain[[i]] <- dp$pointsPerCluster
+    
+    if(genTrueLabels==TRUE){
+        curLikelihood<-LikelihoodDP(dp)
+        likelihoodChain[i] <- sum(log(curLikelihood))
+        
+        cur_theta_y1 <- dp$clusterParameters[[K+1]]
+        cur_theta_y2 <- dp$clusterParameters[[K+2]] 
+        cur_theta_t <- dp$clusterParameters[[K+3]]
+        inc_bet<-numeric(length(cur_theta_t))
+        for(j in 1:length(cur_theta_t)){
+            inc_bet[j]<-Rbeta_memo[round((cur_theta_t[,,j]-t_min)/t_inc)+1, round((cur_theta_y1[,,j]-phi_min)/phi_inc)+1, round((cur_theta_y2[,,j]-lambda_min)/lambda_inc)+1]
+        }
+        # inc_bet<-Rbeta_phi_lambda(cur_theta_t, cur_theta_y1, cur_theta_y2)
+        inc_bet[inc_bet<0]<-0; inc_bet[is.infinite(inc_bet)]<-1; 
+        inc_bet[is.nan(inc_bet)]<-0; inc_bet[inc_bet>1]<-1;
+        
+        temp_mu <- (cur_theta_y1*cur_theta_y2+1)/(cur_theta_y2+1); temp_lambda_new <- cur_theta_y2+1;
+        # print("inc_bet");print(inc_bet);print("cur_theta_t");print(cur_theta_t);print("temp_mu");print(temp_mu);print("temp_lambda_new");print(temp_lambda_new);
+        exp_arg <- cur_theta_y1*(1-Rbeta_phi_lambda(cur_theta_t, temp_mu, temp_lambda_new))/(1-inc_bet)
+        exp_arg[exp_arg<0]<-0; exp_arg[exp_arg>1]<-1;
+        exp_arg[is.nan(exp_arg)]<-0; exp_arg[is.infinite(exp_arg)]<-1; 
+      for(j in 1:gen_N){
+        if(synth_pop[[j]][K+1]==0){
+          curLikelihood[j]<-curLikelihood[j]*dbern(all_true_labels[j], exp_arg[,,dp$clusterLabels[j]])
+        }
+      }
+        completeLikelihoodChain[i]<-sum(log(curLikelihood))
+    }
+    else likelihoodChain[i] <- sum(log(LikelihoodDP(dp)))
+    
+    dp <- ClusterComponentUpdate(dp)
+    dp <- ClusterParameterUpdate(dp)
+
+    if(i%%fq == 0){  
+      # July 12, testing
+      oldAlpha<-dp$alpha
+      dp <- UpdateAlpha(dp) # updating alpha every 10 iterations instead of every iteration
+      if(round(500*dp$alpha) > dp$n) dp$alpha<-oldAlpha
+      # end testing July 12: Ask Nina
+      # NMI_list[i]<-NMI(gen_c,dp$clusterLabels)
+      # print(NMI_list[round(i/fq)])
+      print(dp$pointsPerCluster)
+      print(paste("\t",dp$alpha, likelihoodChain[i], completeLikelihoodChain[i]))
+      print(dp$clusterParameters[[K+1]][,,]); print(dp$clusterParameters[[K+3]][,,]);
+    }
+    if (updatePrior) {dp$mixingDistribution <- PriorParametersUpdate(dp$mixingDistribution,
+                                                        dp$clusterParameters)
+    }
+    if (progressBar){setTxtProgressBar(pb, i)}
+}
+
+dp$weights <- dp$pointsPerCluster / dp$n
+dp$alphaChain <- alphaChain
+dp$likelihoodChain <- likelihoodChain
+dp$weightsChain <- weightsChain
+dp$clusterParametersChain <- clusterParametersChain
+dp$priorParametersChain <- priorParametersChain
+dp$labelsChain <- labelsChain
+
+if (progressBar) {close(pb)}
+fit_end_time = Sys.time() 
+print(fit_end_time-fit_start_time)
+```
+
+
+## Postprocessing Data
+### Log Likelihood over iterations
+```{r}
+#define data
+xax <- c(1:length(dp$likelihoodChain))
+yax <- unlist(dp$likelihoodChain)
+
+#create scatter plot of x vs. y
+plot(xax, yax, col='black', type="l")
+
+#add line of best fit to scatter plot
+abline(lm(yax ~ xax), col='red' , lty='dashed')
+```
+### Data corresponding to maximum likelihood
+```{r}
+# Get the data corresponding to the maximum log likelihood
+argmax<-which(dp$likelihoodChain==max(dp$likelihoodChain))
+final_numberClusters<-max(dp$labelsChain[[argmax]])
+final_clusterLabels<-dp$labelsChain[[argmax]]
+final_pointsPerCluster<-pointsPerClusterChain[[argmax]]
+final_clusterParameters<-dp$clusterParametersChain[[argmax]]
+```
+
+### Value of integral for each cluster
+```{r}
+# Calculating 1-Rbeta_phi_lambda values for all inferred clusters, over all iterations
+rbeta_integrals <- vector("list", length = its)
+
+for (i in seq_len(its)) {
+    curtheta<-dp$clusterParametersChain[[i]]
+    rbeta_integrals[[i]] <- (1-Rbeta_phi_lambda(curtheta[[K+3]], curtheta[[K+1]], curtheta[[K+2]]))[,,]
+}
+```
+
+```{r}
+# nina's suggestion
+# Calculating 1-Rbeta_phi_lambda values for all inferred clusters, over all iterations
+max_nc<-max(unlist(dp$labelsChain))
+rbeta_integrals2 <- list(length = max_nc)
+for(k in seq_len(max_nc)){ # iterating over all inferred cluster labels
+  temp<-array(dim=c(its)) #storing Rbeta values for a given cluster label over its iterations
+  for(i in 1:its){ 
+    if(any(dp$labelsChain[[i]]==k)){ #this label (k) was there in the current iteration (i)
+      temp[i]<-(1-Rbeta_phi_lambda(clusterParametersChain[[i]][[K+3]][,,k], clusterParametersChain[[i]][[K+1]][,,k], clusterParametersChain[[i]][[K+2]][,,k]))
+    }
+  }
+  rbeta_integrals2[[k]]<-temp
+}
+ 
+```
+
+### Matching Fractions for Cluster Populations
+```{r}
+# nina's suggestion
+# Calculating 1-Rbeta_phi_lambda values for all inferred clusters, over all iterations
+max_nc<-max(unlist(dp$labelsChain))
+pop_frac <- list(length = max_nc)
+for(k in seq_len(max_nc)){
+  temp<-array(dim=c(gen_z,its))
+  for(i in 1:its){
+    if(any(dp$labelsChain[[i]]==k)){ #this label (k) was there in the current iteration (i)
+      curhist<-hist(gen_c[dp$labelsChain[[i]]==k], breaks = seq(0,gen_z, by=1), plot=FALSE)$counts
+      # print(paste(k,i,curhist))
+      if(max(curhist)>0){for(j in seq_len(gen_z)) temp[j,][i]<-curhist[j]}
+    }
+  }
+  pop_frac[[k]]<-temp
+}
+ 
+```
+
+```{r}
+popMatch_df<-data.frame(x=c(1:its),
+                       y1=c(pop_frac[[1]][1,]),
+                       y2=c(pop_frac[[2]][1,]),
+                       y3=c(pop_frac[[3]][1,]),
+                       y4=c(pop_frac[[4]][1,])
+                       )
+popMatch_plot<- ggplot(popMatch_df, aes(x)) +  
+    geom_line(aes(y = y1), color = "black") +
+     geom_line(aes(y = y2), color = "red") +
+    geom_line(aes(y = y3), color = "green") +
+    geom_line(aes(y = y4), color = "blue")
+popMatch_plot
+```
+
+```{r}
+# # original method
+# # Calculating 1-Rbeta_phi_lambda values for all inferred clusters, over all iterations
+# pop_frac <- list(length = its)
+# 
+# for (i in seq_len(its)) {
+#     cur_nc<-max(dp$labelsChain[[i]]) # number of clusters in iteration i
+#     cur_pop_frac <- vector("list", length = cur_nc)
+#     for(j in seq_len(cur_nc)){
+#         cur_pop_frac[[j]]<-hist(gen_c[dp$labelsChain[[i]]==j], breaks = seq(0,gen_z, by=1), plot=FALSE)$counts
+#     }
+#     pop_frac[[i]]<-cur_pop_frac
+# }
+```
+
+## Plots of Output
+```{r}
+dp$alpha
+```
+
+```{r}
+# final_numberClusters<-max(dp$labelsChain[[argmax]])
+# final_clusterLabels<-dp$labelsChain[[argmax]]
+# final_pointsPerCluster<-pointsPerClusterChain[[argmax]]
+# final_clusterParameters<-dp$clusterParametersChain[[argmax]]
+```
+
+```{r}
+#define data
+xax <- c(1:length(dp$likelihoodChain))
+yax <- unlist(dp$likelihoodChain/gen_N)
+
+#create scatter plot of x vs. y
+plot(xax, yax, col='black', type="l")
+
+#add line of best fit to scatter plot
+abline(lm(yax ~ xax), col='red')
+
+print(summary(lm(yax ~ xax))$coefficients)
+```
+
+```{r}
+
+par(mfrow=c(1,2))
+hist(final_clusterLabels, nclass=final_numberClusters)
+hist(gen_c, nclass=gen_z)
+```
+
+### Generated Data Categorical Distributions
+```{r}
+df1 <- data.frame(cluster=rep(paste("cluster", c(1:gen_z)), each=m[1]),
+                category=paste("category", c(1:m[1])),
+                Probability=as.vector(gen_theta2[[1]][,,]))
+# head(df2)
+ggplot(data=df1, aes(x=category, y=Probability, fill=cluster)) +
+  geom_bar(stat="identity", position=position_dodge())+
+  geom_text(aes(label=round(Probability,4)), vjust=-0.8, color="black",
+            position = position_dodge(0.9), size=3.5)+
+  scale_fill_brewer(palette="Paired")+ ggtitle("Generated Categorical data")+
+  theme_minimal()
+```
+### Generated Data Beta Distributions, with Thresholds
+```{r}
+par(mfrow=c(1, gen_z))
+for(i in 1:gen_z){
+  plot(betap, dbeta(betap, gen_theta2[[K+1]][,,i]*gen_theta2[[K+2]][,,i], (1-gen_theta2[[K+1]][,,i])*gen_theta2[[K+2]][,,i]), type='l', ylab='density',main=paste("Area:", round(1-Rbeta_memo[round((gen_theta2[[K+3]][,,i]-t_min)/t_inc +1),round((gen_theta2[[K+1]][,,i]-phi_min)/phi_inc +1), round((gen_theta2[[K+2]][,,i]-lambda_min)/lambda_inc +1)],4)))+abline(v = gen_theta2[[K+3]][,,i], col='red')
+  legend(cex=0.5, "topleft",legend=c(paste('Beta(',round(gen_theta2[[K+1]][,,i],2),',',round(gen_theta2[[K+2]][,,i],1),')'), paste('t = ', round(gen_theta2[[K+3]][,,i],2))),col=c('black','red'))
+}
+```
+
+## Plots for Inferred data 
+```{r}
+infCatPlotList<-list(length=K)
+infOtherPlotList<-list(length=final_numberClusters)
+```
+
+### Inferred Data Categorical Distributions
+```{r}
+df2 <- data.frame(cluster=rep(paste("cluster", c(1:final_numberClusters)), each=m[1]),
+                category=paste("category", c(1:m[1])),
+                Probability=as.vector(final_clusterParameters[[1]][,,]))
+# head(df2)
+ggplot(data=df2, aes(x=category, y=Probability, fill=cluster)) +
+  geom_bar(stat="identity", position=position_dodge())+
+  geom_text(aes(label=round(Probability,4)), vjust=-0.8, color="black",
+            position = position_dodge(0.9), size=3.5)+
+  scale_fill_brewer(palette="Paired")+ ggtitle("Inferred Categorical data")+
+  theme_minimal()
+```
+
+
+### Inferred Data Beta Distributions, with Thresholds
+```{r}
+par(mfrow=c(1,3))#round(final_numberClusters/2),2))
+for(i in 1:3){#final_numberClusters){
+  plot(betap, dbeta(betap, final_clusterParameters[[K+1]][,,i]*final_clusterParameters[[K+2]][,,i], (1- final_clusterParameters[[K+1]][,,i])*final_clusterParameters[[K+2]][,,i]), type='l', ylab='density',main=paste("Area:", round(1-Rbeta_memo[round((final_clusterParameters[[K+3]][,,i]-t_min)/t_inc +1),round((final_clusterParameters[[K+1]][,,i]-phi_min)/phi_inc +1), round((final_clusterParameters[[K+2]][,,i]-lambda_min)/lambda_inc +1)],4)))+abline(v = final_clusterParameters[[K+3]][,,i], col='red')
+legend("topleft",legend=c(paste('Beta(',round(final_clusterParameters[[K+1]][,,i],2),',',round(final_clusterParameters[[K+2]][,,i],1),')'), paste('t = ', round(final_clusterParameters[[K+3]][,,i],2))),col=c('black','red'))
+}
+
+```
+```{r}
+df3 <- data.frame(cluster=rep(paste("cluster", c(1:dp$numberClusters)), each=m[1]),
+                category=paste("category", c(1:m[1])),
+                Probability=as.vector(dp$clusterParameters[[1]][,,]))
+# head(df2)
+ggplot(data=df3, aes(x=category, y=Probability, fill=cluster)) +
+  geom_bar(stat="identity", position=position_dodge())+
+  geom_text(aes(label=round(Probability,4)), vjust=-0.8, color="black",
+            position = position_dodge(0.9), size=3.5)+
+  scale_fill_brewer(palette="Paired")+ ggtitle("Inferred Categorical data")+
+  theme_minimal()
+```
+```{r}
+print(dp$pointsPerCluster)
+par(mfrow=c(1,1))
+for(i in 1:1){
+  plot(betap, dbeta(betap, dp$clusterParameters[[K+1]][,,i]*dp$clusterParameters[[K+2]][,,i], (1- dp$clusterParameters[[K+1]][,,i])*dp$clusterParameters[[K+2]][,,i]), type='l', ylab='density', main=paste("Area:", 1-Rbeta_memo[round((dp$clusterParameters[[K+3]][,,i]-t_min)/t_inc +1),round((dp$clusterParameters[[K+1]][,,i]-phi_min)/phi_inc +1), round((dp$clusterParameters[[K+2]][,,i]-lambda_min)/lambda_inc +1)]))+abline(v = dp$clusterParameters[[K+3]][,,i], col='red')
+legend("topleft",legend=c(paste('Beta(',round(dp$clusterParameters[[K+1]][,,i],2),',',round(dp$clusterParameters[[K+2]][,,i],1),')'), paste('t = ', round(dp$clusterParameters[[K+3]][,,i],2))),col=c('black','red'))
+}
+
+```
+```{r}
+tempans<-sort(likelihoodChain, decreasing=TRUE, index.return=TRUE)
+params_sorted_by_likelihood<-clusterParametersChain[order(match(clusterParametersChain, tempans[[2]]))]
+zChain<-unlist(lapply(pointsPerClusterChain, length))
+zChainSorted<-zChain[order(match(zChain, tempans[[2]]))]
+```
+
+```{r}
+plot(likelihoodChain, zChain)
+```
+```{r}
+popMatch_df<-data.frame(x=c(1:its),
+                       y1=c(pop_frac[[1]][1,]),
+                       y2=c(pop_frac[[2]][1,]),
+                       y3=c(pop_frac[[3]][1,]),
+                       y4=c(pop_frac[[4]][1,]),
+                       like=(likelihoodChain-min(likelihoodChain))
+                       )
+popMatch_plot<- ggplot(popMatch_df, aes(x)) +  
+    geom_line(aes(y = y1), color = "black") +
+     geom_line(aes(y = y2), color = "red") +
+    geom_line(aes(y = y3), color = "green") +
+    geom_line(aes(y = y4), color = "blue")+
+  geom_line(aes(y = like), color = "purple")
+popMatch_plot
+```
+
+
+# Rough
+## Generating Custom Population
+
+```{r}
+# Function to generate individuals (returns (trait vector, search decision, outcome of search (if search decision==1)))
+generateInd <- function(theta){
+  x_i<-list()
+  # print(theta_x)
+  for(k in 1:K){
+    x_i<-append(x_i, sample((1:m[k]),1, FALSE, theta[[k]]))
+  }
+  p_i <- rbeta(1,theta[[K+1]]*theta[[K+2]],theta[[K+2]]*(1-theta[[K+1]]))
+  if(p_i>theta[[K+3]]){
+    x_i<-append(x_i,list(1,rbern(1, p_i)))
+    return(x_i)
+  }
+  else{
+    x_i<-append(x_i,list(0,NA))
+    return(x_i)
+  }
+}
+
+# Function to generate cluster parameters (returns (parameters of categorical distributions, parameters of beta distribution, threshold))
+generateCluster <- function(){
+  theta<-list()
+  # Cluster parameters for categorical distributions
+  for (k in 1:K) { # for each of the K features
+    # print("Error here?")
+    theta<-append(theta, list(c(rdirichlet(1, rep(alpha/m[k],m[k]))))) # Categorical probabilities
+  }  
+  # Cluster parameters for beta distribution
+  theta<-append(theta,c(round(runif(1,0,1),2), round(rinvgamma(1, a0_lambda, b0_lambda),1)))
+  theta<-append(theta,round(rbeta(1, phi_t*lambda_t, lambda_t*(1-phi_t)),2))
+  return(theta)
+}
+```
+
+
+## Generative Process (Execution)
+```{r}
+gen_N <- 2000 # number of individuals to generate
+gen_z <- 2 # initialising number of clusters to 1 (for first individual)
+gen_n_c <- c(600, 400) # number of individuals per cluster
+gen_c <- c(rep(1, times=gen_n_c[1]), rep(2, times=gen_n_c[2])) # cluster assignments of individuals
+gen_theta <- list() # list of parameters of generated clusters
+gen_prob_cluster <- c(1/(1+clust_alpha), clust_alpha/(1+clust_alpha))
+
+gen_pop <- list()
+
+# First individual (i=1) goes, by default, to the first cluster
+gen_theta <- append(gen_theta, list(generateCluster()))
+gen_pop <- append(gen_pop, list(list(generateInd(gen_theta[[1]]))))
+
+# For the remaining individuals
+for (i in 2:gen_N){
+  # print(gen_prob_cluster)
+  # print(gen_z)
+  c_i <- sample((1:(gen_z+1)),1, FALSE, gen_prob_cluster) # sampling the cluster for i
+  gen_c[[i]] <- c_i # updating the cluster assignment list for i
+  if(c_i == gen_z+1){
+    # print("here")
+    # individual i has been assigned a new cluster
+    gen_z <- gen_z+1 # updating number of clusters
+    gen_n_c <- append(gen_n_c, 1) # updating number of individuals in assigned cluster
+    # sample new cluster parameters
+    gen_theta <- append(gen_theta, list(generateCluster()))
+    gen_pop <- append(gen_pop, list(list(generateInd(gen_theta[[gen_z]]))))
+    # updating the cluster assignment probabilities
+    for(j in 1:gen_z){
+      gen_prob_cluster[[j]] <- gen_n_c[[j]]/(i + clust_alpha)
+    }
+    gen_prob_cluster <- append(gen_prob_cluster, clust_alpha/(i + clust_alpha))
+  }
+  else{
+    # individual i has been assigned an existing cluster
+    gen_n_c[[c_i]] <- gen_n_c[[c_i]]+1  # updating number of individuals in assigned cluster
+    # generate individual using existing cluster parameters
+    gen_pop[[c_i]] <- append(gen_pop[[c_i]], list(generateInd(gen_theta[[c_i]])))
+    # updating the cluster assignment probabilities
+    for(j in 1:gen_z){
+      gen_prob_cluster[[j]] <- gen_n_c[[j]]/(i + clust_alpha)
+    }
+    gen_prob_cluster[[gen_z+1]] <- clust_alpha/(i + clust_alpha)
+  }
+}
+```
+
+## Trying to find ideal step size
+```{r}
+Initialise_mine <- function(dpObj, posterior = TRUE, m = 3, verbose = TRUE, numInitialClusters=1) {
+
+  # dpObj$clusterLabels <- 1:dpObj$n dpObj$numberClusters <- dpObj$n
+  # dpObj$pointsPerCluster <- rep(1, dpObj$n) dpObj$clusterParameters <-
+  # PosteriorDraw(dpObj$MixingDistribution, dpObj$data, dpObj$n)
+  dpObj$clusterLabels <- rep(1, dpObj$n)
+  dpObj$numberClusters <- 1
+  dpObj$pointsPerCluster <- dpObj$n
+
+  if (posterior) {
+    post_draws <- PosteriorDraw(dpObj$mixingDistribution, dpObj$data, 1000)
+
+    if (verbose){
+      accept_ratio<-length(unique(c(post_draws[[1]])))/1000
+      # cat(paste("Accept Ratio: ",
+      #           length(unique(c(post_draws[[1]])))/1000,
+      #           "\n"))
+    }
+
+    dpObj$clusterParameters <- lapply(post_draws, function(x) x[, , 1000, drop = FALSE])
+
+
+    # dpObj$clusterParameters <- list(post_draws[[1]][, , 1000, drop = FALSE],
+                                    # post_draws[[2]][, , 1000, drop = FALSE])
+  } else {
+    dpObj$clusterParameters <- PriorDraw(dpObj$mixingDistribution, 1)
+  }
+
+  dpObj$m <- m
+
+  return(accept_ratio)
+}
+```
+
+```{r}
+h_i<- c(rep(0, K), 0.,0.,0.)
+best_steps<-h_i
+h_a<-best_steps
+h_b<-best_steps
+y <- aperm(array(unlist(synth_pop), dim=c(K+2,gen_N))) #generate sample data
+```
+
+```{r}
+make_calls<-function(h){
+  combinedMD <- MixingDistribution(distribution = "combined",
+          priorParameters=c(alpha, a0_lambda, b0_lambda, phi_t, lambda_t),
+          conjugate = "nonconjugate",
+          mhStepSize = h)
+  accept<-0
+  for(i in 1:1000){
+    dp <- DirichletProcessCreate(y, combinedMD)
+    accept <- accept+Initialise_mine(dp, verbose=TRUE)
+  }
+  return(accept/1000)
+}
+```
+
+```{r}
+for(i in 1:(1+3)){ # picking one parameter at a time
+  a<-0.0
+  b<-1.0
+  incr<-0.5
+  h_cur<-best_steps
+  best_cur<-make_calls(best_steps)
+  for(j in 1:(round((b-a)/incr))){
+    if(i==1) h_cur[1:K]<-(a+j*incr)
+    else h_cur[[i]]<-(a+j*incr)
+    accept_cur<-make_calls(h_cur)
+    if(accept_cur>best_cur){
+      best_steps<-h_cur
+      best_cur<-accept_cur
+    }
+  }
+  print(best_cur); print(best_steps);
+}
+```
+
+
+
+
+## Calculating Rbeta
+
+```{r}
+t_min<-0; t_max<-1.0; t_inc<-0.01;
+phi_min<-0.; phi_max<-1.0; phi_inc<-0.01;
+lambda_min<-0; lambda_max<-50.0; lambda_inc<-0.1;
+# Rbeta_memo<-array(dim = c(round(1+(t_max-t_min)/t_inc),round(1+(phi_max-phi_min)/phi_inc), round(1+(lambda_max-lambda_min)/lambda_inc)))
+# reference it as Rbeta_memo[threhold, lambda, phi]
+```
+
+```{r}
+# print(Sys.time())
+# for(t in 0:round((t_max-t_min)/t_inc)){
+#   thresh<-round(t_min+t*t_inc,2)
+#   for(phi in 0:round((phi_max-phi_min)/phi_inc)){
+#     phi_cur<-round(phi_min+phi_inc*phi,2)
+#     for(lambda in 0: round((lambda_max-lambda_min)/lambda_inc)){
+#       lambda_cur<-round(lambda_min+lambda_inc*lambda,1)
+#       # ifelse((thresh*phi_cur*lambda_cur==0)||(any(round(c(thresh,phi_cur, lambda_cur),2)==1)),Rbeta_memo[t+1,phi+1,lambda+1]<-0, Rbeta_memo[t+1,phi+1,lambda+1]<-Rbeta_phi_lambda(thresh, phi_cur, lambda_cur)) 
+#       Rbeta_memo[t+1,phi+1,lambda+1]<-Rbeta_phi_lambda(thresh, phi_cur, lambda_cur)
+#     }
+#   }
+# }
+# print(Sys.time())
+```
+
+```{r}
+# # Testing
+# errcount<-0
+# eps<-1e-8
+# for(i in 1:1000){
+#   tt<-round(rbeta(1, phi_t*lambda_t, lambda_t*(1-phi_t))  ,2)
+#   pp<-round(runif(1,0,1),2)
+#   ll<- min(round(rinvgamma(1, a0_lambda, b0_lambda),1),50)
+#   
+#   print(paste("cur:",tt,pp,ll))
+#   if(tt==1 || pp==1){
+#     print(paste(tt,pp,Rbeta_memo[1+round((tt-t_min)/t_inc), 1+round((pp-phi_min)/phi_inc), 1+round((ll-lambda_min)/lambda_inc)]))
+#   }
+#   else if(abs(Rbeta_memo[1+round((tt-t_min)/t_inc), 1+round((pp-phi_min)/phi_inc), 1+round((ll-lambda_min)/lambda_inc)]-as.numeric(Rbeta_phi_lambda(round(tt,2),round(pp,2),round(ll,1))))>1e-8){
+#     print(paste("ERROR:",tt,pp,ll,"  ",Rbeta_memo[1+round((tt-t_min)/t_inc), 1+round((pp-phi_min)/phi_inc), 1+round((ll-lambda_min)/lambda_inc)],", ",Rbeta_phi_lambda(round(tt,2),round(pp,2),round(ll,1))))
+#     errcount<-errcount+1
+#     break
+#   }
+# }
+```

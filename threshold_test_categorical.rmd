@@ -1,0 +1,668 @@
+---
+title: "Inferring Groups and Thresholds: Approach 2"
+output:
+  html_notebook:
+      toc: yes
+  pdf_document:
+      toc: yes
+---
+
+# Preliminaries
+## Packages and Libraries
+### Packages
+```{r}
+install.packages("dirichletprocess")
+install.packages("rBeta2009") # for using rdirichlet
+install.packages('spsh') # for using Ibeta
+install.packages('extraDistr')
+install.packages("aricode")
+install.packages("ggplot2") # for plotting data
+install.packages("gridExtra") # for plotting data
+install.packages("dplyr")
+install.packages("tidyr")
+install.packages("ggpubr")
+```
+
+### Libraries
+```{r}
+library(ggplot2)
+library(dirichletprocess)
+library(rBeta2009)
+library(spsh)
+library(extraDistr)
+library(aricode)
+library(ggplot2)
+library(gridExtra)
+library(gtable)
+library(ggpubr)
+```
+
+## Globals
+```{r}
+set.seed(NULL)
+K <- 1 # number of observed traits
+m <- c(2)  # number of categories for each of the K traits
+b<- 4# number of bins
+# bin_probs<-c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0)
+# bin_probs<-c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0)-0.05
+# bin_probs<-c(0.2,0.4,0.6,0.8,1.0)
+# bin_probs<-round(c(0.2,0.4,0.6,0.8,1.0)-0.1,1)
+bin_probs<-c(0.25,0.5,0.75,1.0)
+bin_probs<-round(c(0.25,0.5,0.75,1.0)-0.125,3)
+sigfigs<-3
+```
+
+## Hyperparameters
+```{r}
+# Hyperparameters for categorical distributions from which the the traits are drawn
+alpha_x <- list(length=K) 
+for(k in 1:K) alpha_x[[k]]<-c(rep(1, m[k]))
+
+# Hyperparameters for the categorical distribution from which the probability bins are drawn
+alpha_p <- c(rep(1, b))
+
+# Parameters of categorical dist. from which threshold is drawn
+cat_t <- c(rep(1/b, b))
+
+# Parameter for DP cluster allocation
+clust_alpha<-1
+```
+
+
+# Synthetic Data
+## Generating Functions
+```{r}
+# Function to generate individuals (returns (trait vector, search decision, outcome of search (if search decision==1)))
+generateInd <- function(theta){
+  x_i<-numeric(length=(K+2))
+  # print(theta_x)
+  for(k in 1:K){
+    x_i[k]<- as.integer(rcat(1, theta[[k]]))#sample((1:m[k]),1, FALSE, theta[[k]])
+  }
+  b_i <- as.integer(rcat(1,theta[[K+1]]))
+  x_i[K+1]<-ifelse(b_i >= which(abs(bin_probs-theta[[K+2]])==min(abs(bin_probs-theta[[K+2]]))), 1, 0)# decision taken on x_i
+  x_i[K+2]<-b_i # an individual is defined by K+2 values: (K features, decision taken on them, probability bin to which they belong)
+  # checks
+  # if(bin_probs[x_i[K+2]]< theta[[K+2]] & x_i[K+1]==1) x_i[K+1]<-0
+  # if(bin_probs[x_i[K+2]]>= theta[[K+2]] & x_i[K+1]==0) x_i[K+1]<-1
+  # end of checks
+  return(x_i)
+}
+
+# Function to generate cluster parameters (returns (parameters of categorical distributions, parameters of beta distribution, threshold))
+generateCluster <- function(){
+  theta<-list()
+  # Cluster parameters for categorical distributions
+  for (k in 1:K) { # for each of the K features
+    # print("Error here?")
+    theta<-append(theta, list(c(rdirichlet(1, alpha_x[[k]])))) # Categorical probabilities for traits
+  }  
+  # Cluster parameters for beta distribution
+  theta<-append(theta, list(c(rdirichlet(1, alpha_p)))) # Categorical probabilities for probability of carrying bins
+  theta<-append(theta,bin_probs[rcat(1, cat_t)]) # threshold value
+  # a cluster is defined by K+2 values: (K categorical probabilities, categorical probabilities for bins (for probability of label=1),  threshold employed)
+  return(theta)
+}
+```
+
+
+## Hand-coded synthetic data
+```{r}
+clust_alpha<-1
+gen_N <- 1200 # number of individuals to generate
+gen_z <- 2 # initialising number of clusters to 1 (for first individual)
+gen_n_c <- c(600,600) # number of individuals per cluster
+if(sum(gen_n_c)!=gen_N) print("ERROR in gen_N!=SUM(GEN_N_C)")
+gen_c <- c(rep(1, times=gen_N)) # cluster assignments of individuals
+gen_theta <- list(list(c(0.9,0.1), c(0.2,0.3,0.4,0.1), bin_probs[b-1]), list(c(0.1, 0.9),  c(0.2,0.5,0.2,0.1), bin_probs[b-2])) # list of parameters of generated clusters
+# gen_prob_cluster <- c(1/(1+clust_alpha), clust_alpha/(1+clust_alpha))
+
+gen_pop <- list()
+
+# For the remaining individuals
+ind_count<-0
+for(j in 1:gen_z){
+  for(i in 1:gen_n_c[j]){ # iteratively creating individuals for the jth cluster
+    ind_count<-ind_count+1
+    gen_c[ind_count] <- j
+    gen_pop <- append(gen_pop, list(list(generateInd(gen_theta[[j]]))))
+  }
+}
+
+synth_pop<-unlist(gen_pop, recursive = FALSE)
+```
+
+## Generative Process (Execution)
+```{r}
+clust_alpha<-0.3
+gen_N <- 5000 # number of individuals to generate
+gen_z <- 1 # initialising number of clusters to 1 (for first individual)
+gen_n_c <- c(1) # number of individuals per cluster
+gen_c <- rep(1, times=gen_N) # cluster assignments of individuals
+gen_theta <- list() # list of parameters of generated clusters
+gen_prob_cluster <- c(1/(1+clust_alpha), clust_alpha/(1+clust_alpha))
+
+gen_pop <- list()
+
+# First individual (i=1) goes, by default, to the first cluster
+gen_theta <- append(gen_theta, list(generateCluster()))
+gen_pop <- append(gen_pop, list(list(generateInd(gen_theta[[1]]))))
+
+# For the remaining individuals
+for (i in 2:gen_N){
+  c_i <- rcat(1, gen_prob_cluster)#sample((1:(gen_z+1)),1, FALSE, gen_prob_cluster) # sampling the cluster for i
+  gen_c[[i]] <- c_i # updating the cluster assignment list for i
+  if(c_i == gen_z+1){
+    # individual i has been assigned a new cluster
+    gen_z <- gen_z+1 # updating number of clusters
+    gen_n_c <- append(gen_n_c, 1) # updating number of individuals in assigned cluster
+    # sample new cluster parameters
+    gen_theta <- append(gen_theta, list(generateCluster()))
+    gen_pop <- append(gen_pop, list(list(generateInd(gen_theta[[gen_z]]))))
+    # updating the cluster assignment probabilities
+    for(j in 1:gen_z){
+      gen_prob_cluster[[j]] <- gen_n_c[[j]]/(i + clust_alpha)
+    }
+    gen_prob_cluster <- append(gen_prob_cluster, clust_alpha/(i + clust_alpha))
+  }
+  else{
+    # individual i has been assigned an existing cluster
+    gen_n_c[[c_i]] <- gen_n_c[[c_i]]+1  # updating number of individuals in assigned cluster
+    # generate individual using existing cluster parameters
+    gen_pop[[c_i]] <- append(gen_pop[[c_i]], list(generateInd(gen_theta[[c_i]])))
+    # updating the cluster assignment probabilities
+    for(j in 1:gen_z){
+      gen_prob_cluster[[j]] <- gen_n_c[[j]]/(i + clust_alpha)
+    }
+    gen_prob_cluster[[gen_z+1]] <- clust_alpha/(i + clust_alpha)
+  }
+}
+synth_pop<-unlist(gen_pop, recursive = FALSE)
+```
+
+## Data generated from Generative Process
+```{r}
+temp_synth_pop<-unlist(gen_pop, recursive = FALSE)
+old_gen_theta<-gen_theta
+old_gen_c<-gen_c
+old_gen_N<-gen_N
+old_gen_n_c<-gen_n_c
+old_gen_z<-gen_z
+```
+
+### Dropping those clusters which have <10 individuals
+```{r}
+ind_to_rem<-c()
+clust_to_rem<-c()
+for(nc in 1:gen_z){
+  if(gen_n_c[[nc]]<1000){
+    clust_to_rem<-append(clust_to_rem, nc)
+    ind_to_rem<-append(ind_to_rem, which(gen_c==nc)) # individuals to remove
+  }
+}
+```
+
+```{r}
+synth_pop<-temp_synth_pop[-ind_to_rem]
+gen_theta<-gen_theta[-clust_to_rem]
+gen_c<-gen_c[-ind_to_rem]
+gen_N<-gen_N-length(ind_to_rem)
+gen_n_c<-gen_n_c[-clust_to_rem]
+gen_z<-gen_z-length(clust_to_rem)
+```
+
+```{r}
+j<-1
+for(i in 1:max(gen_n_c)){
+  if(any(gen_c==i)){
+    gen_c[gen_c==i]<-j
+    j<-j+1
+  }
+}
+gen_n_c<-as.vector(table(gen_c))
+```
+
+## Storing generated theta
+```{r}
+gen_theta2<-list()
+for(j in 1:(K+2)){
+  temp<-list()
+  for(i in 1:gen_z){
+    temp<-append(temp, list(gen_theta[[i]][[j]]))
+  }
+  gen_theta2<-append(gen_theta2, list(array(unlist(temp),dim=c(1,length(gen_theta[[1]][[j]]),gen_z))))
+}
+```
+
+
+
+## Plotting synthetic data
+### Generated Data Categorical Distributions
+```{r}
+df1 <- data.frame(cluster=rep(paste("cluster", c(1:gen_z)), each=m[1]),
+                category=paste("category", c(1:m[1])),
+                Probability=as.vector(gen_theta2[[1]][,,]))
+# head(df2)
+ggplot(data=df1, aes(x=category, y=Probability, fill=cluster)) + ylim(0, 1)+
+  geom_bar(stat="identity", position=position_dodge())+
+  geom_text(aes(label=round(Probability,4)), vjust=-0.8, color="black",
+            position = position_dodge(0.9), size=3.5)+labs(title="Generated Categorical Dist. over Traits")+
+  scale_fill_brewer(palette="Paired")+
+  theme_minimal()
+```
+
+### Generated Data Categorical Distribution over Probability Bins
+```{r}
+genplotlist<-list(length=gen_z)
+for(i in 1:gen_z){
+  df2 <- data.frame(cluster=rep(paste("cluster", c(1:gen_z)), each=b),
+                    pbin=paste("bin", c(0:(b-1))),
+                  Probability=as.vector(gen_theta2[[K+1]][,,i]))
+  # head(df2)
+  genplotlist[[i]]<-(ggplot(data=df2, aes(x=pbin, y=Probability)) + ylim(0, 1)+
+    geom_bar(stat="identity", position=position_dodge())+
+    geom_text(aes(label=round(Probability,4)), vjust=-0.8, color="black",
+              position = position_dodge(0.9), size=3.5)+labs(title = paste("Generated Probability Bins: Cluster ", i),
+       subtitle = paste('Population=', gen_n_c[i], "| threshold = ", gen_theta2[[K+2]][,,i]))+
+    scale_fill_brewer(palette="Paired")+
+    theme_minimal())
+  print(genplotlist[[i]])
+}
+```
+
+```{r}
+ggarrange(genplotlist[[1]], genplotlist[[2]],
+          labels = c(1:2), ncol = 2, nrow = 3)
+```
+
+```{r}
+gen_theta2[[K+2]][,,]
+```
+
+```{r}
+# if(sd(gen_theta2[[K+2]][,,])<0.1){
+#   print("Generate again")
+#   print(paste("stddev", sd(gen_theta2[[K+2]][,,])))
+# }
+```
+
+### Final Synthetic Population
+
+# Inference
+## Defining the Mixing Distribution Object
+
+Section 4.1 of https://cran.r-project.org/web/packages/dirichletprocess/vignettes/dirichletprocess.pdf
+
+Since we are working with a non-conjugate mixing distribution, we need to define the following:
+
+1. $\texttt{Likelihood}$
+2. $\texttt{PriorDraw}$  
+3. $\texttt{g0Priors}$
+4. $\texttt{PriorDensity}$
+5. $\texttt{mhParameterProposal}$
+6. $\texttt{mhStepSize}$
+
+
+### 1. Likelihood Function
+
+A function which specifies the density of the mixture kernel $k(y | \theta)$.
+
+Since ours is a mixture of a _composite_ distribution (involving multiple categorical distributions and two beta distributions), we define the Likelihood function as the product of the likelihoods of each of the RVs (thus there is an assumption of independence).
+
+```{r}
+# Likelihood function
+# an individual is defined by K+2 values: (K features, decision taken on them, probability bin to which they belong)
+# a cluster is defined by K+2 values: (K categorical probabilities, categorical probabilities for bins (for probability of label=1),  threshold employed)
+Likelihood.combined <- function(mdobj, ind, theta){
+    # likelihoodCalls<<-likelihoodCalls+1
+    cur_theta_b <- theta[[K+1]][,,,drop=TRUE]
+    cur_theta_t <- theta[[K+2]][,,,drop=TRUE]
+    # print("________________________");print(size(ind)); print(size(d)); print(size(p));
+    x<-1
+    for(k in 1:K){
+      x<-x*as.numeric(dcat(ind[,k], matrix(c(theta[[k]]), length(cur_theta_t), m[k])))
+    }
+    pbin<-as.numeric(dcat(ind[,K+2], matrix(c(theta[[K+1]]), length(cur_theta_t), b)))
+    # print("________________________");print(size(x)); print(size(p)); #print(size(d)); 
+    d<-as.numeric((1-ind[,K+1])*(round(bin_probs[ind[,K+2]]*10^sigfigs)<round(cur_theta_t*10^sigfigs))+ind[,K+1]*((round(bin_probs[ind[,K+2]]*10^sigfigs)>round(cur_theta_t*10^sigfigs))+(round(bin_probs[ind[,K+2]]*10^sigfigs)==round(cur_theta_t*10^sigfigs))))
+    # print(d);
+    # if(any(abs(x*d*pbin==0))){
+    #   whichones<-which(x*d*pbin==0)
+    #   print("error in likelihood"); print(whichones);print(ind[whichones,]); print(theta);
+    # }
+    return(as.numeric(x*d*pbin))
+}  
+```
+
+### 2. PriorDraw Function
+A function which returns a random sample of size $n$ from the DP base measure $G_0$. This is used to define $G_0$.
+
+```{r}
+PriorDraw.combined <- function(mdobj, n=1){
+  priorDrawCalls<<-priorDrawCalls+1
+  theta<-list(length=K+2)
+  # Cluster parameters for categorical distributions
+  for (k in 1:K) { # for each of the K features
+      theta[[k]] = array(aperm(rdirichlet(n, rep(mdobj$priorParameters[[1]][[k]],m[k]))), dim = c(1, m[k],n)) # Categorical probabilities of traits
+  }  
+  # Cluster parameters for beta distribution
+  theta[[K+1]] = array(aperm(rdirichlet(n, rep(mdobj$priorParameters[[2]],b))), dim = c(1, b,n)) # Categorical probabilities of bins
+  theta[[K+2]] = array(bin_probs[rcat(n, mdobj$priorParameters[[3]])], dim = c(1,1,n))
+  return(theta)
+}
+```
+
+
+### 3. $G_0$ Priors
+A list of parameters for the base measure $G_0$. Again, this is used to define $G_0$.
+```{r}
+# Identical to the subsection Hyperparameters
+# the assignment of these values to the g0Priors takes place while declaring the DP object
+# Hyperparameters for categorical distributions from which the the traits are drawn
+alpha_x <- list(length=K) 
+for(k in 1:K) alpha_x[[k]]<-c(rep(1, m[k]))
+
+# Hyperparameters for the categorical distribution from which the probability bins are drawn
+alpha_p <- c(rep(1, b))
+
+# Parameters of categorical dist. from which threshold is drawn
+cat_t <- c(rep(1/b, b))
+
+# Parameter for DP cluster allocation
+clust_alpha<-1
+```
+
+
+### 4. Posterior Draw
+A function that returns a sample of size n given data y from the posterior distribution of θ, i.e. a sample from the distribution of p(θ | y).
+```{r}
+# Need to check
+PosteriorDraw.combined <- function(mdobj, x, n=1){
+  priorParameters <- mdobj$priorParameters
+  theta<-list(length=K+2)
+  
+  if(size(x)[1]==1){
+    for (k in 1:K) { # for each of the K features
+    for(j in 1:m[k]) {priorParameters[[1]][[k]][j]<-priorParameters[[1]][[k]][j]+sum(x[k]==j)}
+        theta[[k]] = array(aperm(rdirichlet(n, priorParameters[[1]][[k]])), dim = c(1, m[k],n)) # Categorical probabilities of traits
+    } 
+    for(j in 1:b){priorParameters[[2]][j]<-priorParameters[[2]][j]+sum(x[K+2]==j)}
+    theta[[K+1]] = array(aperm(rdirichlet(n, priorParameters[[2]])), dim = c(1, b,n)) # Categorical probabilities of bins
+    if(x[K+1]==0){
+      t_c_L <- x[K+2]+1
+      t_c_H <- min(b, x[K+2]+1)
+    }
+    else{
+      t_c_L <- 1
+      t_c_H <- max(1, x[K+2]) # not sure how inefficient this is/ if there's a better way
+    }
+  }
+  else{
+    for (k in 1:K) { # for each of the K features
+    for(j in 1:m[k]) {priorParameters[[1]][[k]][j]<-priorParameters[[1]][[k]][j]+sum(x[,k]==j)}
+        theta[[k]] = array(aperm(rdirichlet(n, priorParameters[[1]][[k]])), dim = c(1, m[k],n)) # Categorical probabilities of traits
+    } 
+    for(j in 1:b){priorParameters[[2]][j]<-priorParameters[[2]][j]+sum(x[,K+2]==j)}
+    theta[[K+1]] = array(aperm(rdirichlet(n, priorParameters[[2]])), dim = c(1, b,n)) # Categorical probabilities of bins
+    t_c_L <- max(max((x[,K+1]==0)*x[,K+2])+1,1)
+    t_c_H <- min(((x[,K+1]==1)*x[,K+2])[(x[,K+1]==1)*x[,K+2]>0]) # not sure how inefficient this is/ if there's a better way to do the same thing
+  }
+  if(is.infinite(t_c_L)){
+    print("NEW problem with t_c_L")
+    print(x)
+  }
+  if(is.infinite(t_c_H)){
+    t_c_H<-t_c_L
+  }
+  if(t_c_L==0){
+    print("problem with t_c_L")
+    print(x)
+  }
+  theta[[K+2]] = array(bin_probs[rcat(n, priorParameters[[3]][t_c_L:t_c_H]/sum(priorParameters[[3]][t_c_L:t_c_H]))+t_c_L-1], dim = c(1,1,n))
+  return(theta)
+  # lambda <- rgamma(n, priorParameters[1] + sum(x), priorParameters[2] + nrow(x))
+}
+```
+
+
+### 5. Predictive
+A function that returns the value of the marginal distribution of the data $f(y) = \int{k(y, θ)dG(θ})$
+```{r}
+# Need to work on Predictive(combinedMD, y)
+Predictive.combined <- function(mdobj, x){
+  priorParameters <- mdobj$priorParameters
+  pred <- numeric(size(x)[1])
+  const_trait<-as.numeric(lapply(lapply(priorParameters[[1]], sum), gamma))/as.numeric(lapply(lapply(priorParameters[[1]], gamma), prod))/as.numeric(lapply(as.numeric(lapply(priorParameters[[1]], sum))+1, gamma))
+  const_pd<-as.numeric(gamma(sum(priorParameters[[2]])))/as.numeric(prod(gamma(priorParameters[[2]])))/as.numeric(gamma(sum(priorParameters[[2]])+1))
+  
+  # print(const_trait); print(const_pd);
+  for(i in 1:size(x)[1]){
+    pred[i]<-1
+    for (k in 1:K) { # for each of the K features
+      pred[i]<-pred[i]*const_trait[k]*prod(gamma(priorParameters[[1]][[k]][-x[,k][i]]))*gamma(1+priorParameters[[1]][[k]][x[,k][i]])
+    }
+    # print(paste("Stage 1: i", i, ", p[i]:",pred[i]))
+    pred[i]<-pred[i]*const_pd*prod(gamma(priorParameters[[2]][-x[,K+2][i]]))*gamma(1+priorParameters[[2]][x[,K+2][i]])
+    # print(paste("Stage 2: i", i, ", p[i]:",pred[i]))
+    tempsum<-0
+    for(j in 1:b) tempsum<-tempsum+priorParameters[[3]][j]*ifelse(bin_probs[x[,K+2][i]]>=bin_probs[j], x[,K+1][i], 1-x[,K+1][i])
+    pred[i]<-pred[i]*tempsum
+    # print(i); print(pred[i]);
+  }
+  # if(any(pred<0)) {print("Error in predictive: x=");print(length(x));print(pred);}
+  return(pred)
+}
+```
+
+
+### Defining the mixing distribution object
+```{r}
+combinedMD <- MixingDistribution(distribution = "combined",
+          priorParameters=list(alpha_x, alpha_p, cat_t),
+          conjugate = "conjugate") 
+```
+
+
+## Fitting the DP
+Having specified the above, the Fit function can again be used to fit the DP, which carries out the
+Chinese Restaurant Sampling can be performed using ‘Algorithm 8‘ (Neal 2000).
+
+## Dirichlet Process Object Definitions
+Once the appropriate mixing distribution is defined we can create a dirichletprocess object
+which contains the data, the mixing distribution object and the parameter α. Then the rest
+of dirichletprocess class functions are available.
+```{r}
+y <- aperm(array(unlist(synth_pop), dim=c(K+2,gen_N)))
+```
+
+## Inference with new method to test for convergence
+From https://dm13450.github.io/2020/01/11/Dirichlet-Convergence.html
+
+## Initialising the DP
+
+```{r}
+CustomInitialisePredictive<- function(dpObj) {
+
+  dpObj$predictiveArray <- Predictive(dpObj$mixingDistribution, dpObj$data)
+
+  return(dpObj)
+}
+
+
+CustomInitialise <- function(dpObj, posterior = TRUE, m=NULL, verbose=NULL, numInitialClusters = 1) {
+  dpObj$clusterLabels <- rep_len(seq_len(numInitialClusters), length.out = dpObj$n)
+  dpObj$numberClusters <- numInitialClusters
+  dpObj$pointsPerCluster <- vapply(seq_len(numInitialClusters), function(x) sum(dpObj$clusterLabels == x), numeric(1))
+
+  if (posterior && numInitialClusters == 1) {
+    dpObj$clusterParameters <- PosteriorDraw(dpObj$mixingDistribution, dpObj$data, 1)
+  } else {
+    for(i in 1:numInitialClusters){
+      dpObj$clusterParameters[[i]] <- PosteriorDraw(dpObj$mixingDistribution, dpObj$data[which(dpObj$clusterLabels ==i),], 1)
+    }
+  }
+  
+  dpObj$clusterParameters <- PosteriorDraw(dpObj$mixingDistribution, dpObj$data, numInitialClusters)
+  
+  dpObj <- CustomInitialisePredictive(dpObj)
+
+  return(dpObj)
+}
+```
+
+```{r}
+dp1 <- DirichletProcessCreate(y, combinedMD)
+likelihoodCalls<-0; priorDrawCalls<-0; priorDensityCalls<-0;MhParameterProposalCalls<-0;
+print("Initialising")
+initialise_start_time = Sys.time()
+dp1 <- Initialise(dp1, posterior = TRUE, verbose=TRUE, numInitialClusters = 1)
+initialise_end_time = Sys.time()
+print(initialise_end_time-initialise_start_time)
+```
+
+```{r}
+dp2 <- DirichletProcessCreate(y, combinedMD)
+likelihoodCalls<-0; priorDrawCalls<-0; priorDensityCalls<-0;MhParameterProposalCalls<-0;
+print("Initialising")
+initialise_start_time = Sys.time()
+dp2 <- Initialise(dp2, posterior = TRUE,verbose=TRUE, numInitialClusters = 1)
+initialise_end_time = Sys.time()
+print(initialise_end_time-initialise_start_time)
+```
+```{{r setup, warning=FALSE}
+```
+```{r}
+its<-20000
+```
+
+```{r, warning=FALSE}
+fit_start_time = Sys.time()
+print("Starting at:");print(fit_start_time);
+dp1 <- Fit(dp1, its)
+fit_end_time = Sys.time() 
+print(fit_end_time-fit_start_time)
+```
+
+```{r, warning=FALSE}
+fit_start_time = Sys.time()
+print("Starting at:");print(fit_start_time);
+dp2 <- Fit(dp2, its)
+fit_end_time = Sys.time() 
+print(fit_end_time-fit_start_time)
+```
+
+```{r}
+require(dplyr)
+require(tidyr)
+```
+
+```{r}
+alphaFrame <- data.frame(Chain1 = dp1$alphaChain, Chain2 = dp2$alphaChain, Iter=seq_len(its))
+alphaFrame %>% gather(Chain, Value, -Iter) -> alphaFrameTidy
+ggplot(alphaFrameTidy, aes(x=Iter, y=Value, colour=Chain)) + geom_line()
+```
+
+```{r}
+require(coda)
+chains <- mcmc.list(mcmc(cbind(Alpha = dp1$alphaChain)),
+                    mcmc(cbind(Alpha= dp2$alphaChain)))
+
+gelman.plot(chains)
+```
+
+```{r}
+numClusters <- vapply(dp1$weightsChain, function(x) length(x), numeric(1))
+numClusters2 <- vapply(dp2$weightsChain, function(x) length(x), numeric(1))
+
+chains <- mcmc.list(mcmc(cbind(Alpha = dp1$alphaChain, 
+                               NumClusters = numClusters, 
+                               Likelihood = dp1$likelihoodChain)),
+                    mcmc(cbind(Alpha= dp2$alphaChain, 
+                               NumClusters = numClusters2,
+                               Likelihood = dp2$likelihoodChain)))
+
+gelman.plot(chains)
+```
+```{r}
+gelman.diag(chains)
+```
+
+```{r}
+for(i in 1:K){
+  df3 <- data.frame(cluster=rep(paste("cluster", c(1:dp1$numberClusters)), each=m[k]),
+                  category=paste("category", c(1:m[k])),
+                  Probability=as.vector(dp1$clusterParameters[[k]][,,]))
+  # head(df2)
+print(  ggplot(data=df3, aes(x=category, y=Probability, fill=cluster)) + ylim(0, 1)+
+    geom_bar(stat="identity", position=position_dodge())+
+    geom_text(aes(label=round(Probability,4)), vjust=-0.8, color="black",
+              position = position_dodge(0.9), size=3.5)+labs(title="Inferred Categorical Dist. over Traits")+
+    scale_fill_brewer(palette="Paired")+
+    theme_minimal())
+}
+```
+```{r}
+dp1$pointsPerCluster
+```
+```{r}
+dp1$clusterParameters
+```
+
+```{r}
+for(i in 1:dp1$numberClusters){
+  df4 <- data.frame(cluster=rep(paste("cluster", c(1:dp1$numberClusters)), each=b),
+                    pbin=paste("bin", c(0:(b-1))),
+                  Probability=as.vector(dp1$clusterParameters[[2]][,,i]))
+  # head(df2)
+  print(ggplot(data=df4, aes(x=pbin, y=Probability)) + ylim(0, 1)+
+    geom_bar(stat="identity", position=position_dodge())+
+    geom_text(aes(label=round(Probability,4)), vjust=-0.8, color="black",
+              position = position_dodge(0.9), size=3.5)+ labs(title = paste("Inferred Probability Bins: Cluster ", i),
+       subtitle = paste('Population=', dp1$pointsPerCluster[i], "| threshold = ", dp1$clusterParameters[[K+2]][,,i]))+
+    scale_fill_brewer(palette="Paired")+
+    theme_minimal())
+}
+```
+
+## Other Plots
+```{r}
+for(i in 1:K){
+  df3 <- data.frame(cluster=rep(paste("cluster", c(1:dp2$numberClusters)), each=m[k]),
+                  category=paste("category", c(1:m[k])),
+                  Probability=as.vector(dp2$clusterParameters[[k]][,,]))
+  # head(df2)
+print(  ggplot(data=df3, aes(x=category, y=Probability, fill=cluster)) + ylim(0, 1)+
+    geom_bar(stat="identity", position=position_dodge())+
+    geom_text(aes(label=round(Probability,4)), vjust=-0.8, color="black",
+              position = position_dodge(0.9), size=3.5)+labs(title="Inferred Categorical Dist. over Traits")+
+    scale_fill_brewer(palette="Paired")+
+    theme_minimal())
+}
+```
+```{r}
+dp2$pointsPerCluster
+```
+
+```{r}
+plotlist2<-list(length=dp2$numberClusters)
+for(i in 1:dp2$numberClusters){
+  df4 <- data.frame(cluster=rep(paste("cluster", c(1:dp2$numberClusters)), each=b),
+                    pbin=paste("bin", c(0:(b-1))),
+                  Probability=as.vector(dp2$clusterParameters[[2]][,,i]))
+  # head(df2)
+  plotlist2[[i]]<-(ggplot(data=df4, aes(x=pbin, y=Probability)) + ylim(0, 1)+
+    geom_bar(stat="identity", position=position_dodge())+
+    geom_text(aes(label=round(Probability,4)), vjust=-0.8, color="black",
+              position = position_dodge(0.9), size=3.5)+
+    scale_fill_brewer(palette="Paired")+ labs(title = paste("Inferred Probability Bins: Cluster ", i),
+       subtitle = paste('Population=', dp2$pointsPerCluster[i], "| threshold = ", dp2$clusterParameters[[K+2]][,,i]))+
+    theme_minimal())
+  print(plotlist2[[i]])
+}
+```
+
+```{r}
+ggarrange(plotlist2[[1]], plotlist2[[2]], plotlist2[[3]], plotlist2[[4]], 
+          labels = c(1:4),
+          ncol = 2, nrow = 2)
+```
